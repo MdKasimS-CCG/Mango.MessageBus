@@ -19,8 +19,6 @@
     
     <Company>Cornerstone-Consulting</Company>
 
-    <Description>We are professional AWS partners</Description>
-
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
 
