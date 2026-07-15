@@ -1,0 +1,1 @@
+This is a package required by Mango application to have MessageBus. It enables event-driven architecture for online system - Mango.
