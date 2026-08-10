@@ -13,13 +13,14 @@
 
     <Description>Shared Message Bus library for Mango Microservices.</Description>
 
-    <RepositoryUrl>https://github.com/MdKasimS-CCG/Mango.MessageBus</RepositoryUrl>
+    <RepositoryUrl>https://github.com/MdKasimS-CCG/Mango.MessageBus.git</RepositoryUrl>
 
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    
+
     <Company>Cornerstone-Consulting</Company>
 
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IsPackable>true</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>
