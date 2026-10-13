@@ -1,4 +1,5 @@
-﻿using Newtonsoft.Json;
+﻿using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
 
 using RabbitMQ.Client;
 
@@ -12,20 +13,37 @@ namespace Mango.MessageBus
         private readonly string _hostName;
         private readonly string _userName;
         private readonly string _password;
+        private readonly int _port;
         private IConnection _connection;
 
-        public RabbitMQMessageProducer()
+        public RabbitMQMessageProducer(IConfiguration configuration)
         {
-            // TODO: Make it DI specific code that can be passed via args as well
-            _hostName = "localhost";
-            _userName = "guest";
-            _password = "guest";
+            // Falls back to the old values if nothing is configured,
+            // so local runs still work.
+            _hostName = Read(configuration, "HostName") ?? "localhost";
+            _userName = Read(configuration, "UserName") ?? "guest";
+            _password = Read(configuration, "Password") ?? "guest";
+            _port = int.TryParse(Read(configuration, "Port"), out var p) ? p : 5672;
+        }
+
+        // Checks Docker:/Http: prefixed key first, then the plain key.
+        private static string? Read(IConfiguration config, string name)
+        {
+            var inContainer =
+                Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") == "true";
+            var profile = inContainer ? "Docker" : "Http";
+            var key = $"MessageQueue:RabbitMQ:{name}";
+
+            var value = config[$"{profile}:{key}"];
+            if (string.IsNullOrWhiteSpace(value)) value = config[key];
+            return string.IsNullOrWhiteSpace(value) ? null : value;
         }
         public async Task SendMessage(object message, string queueName)
         {
             var factory = new ConnectionFactory()
             {
                 HostName = _hostName,
+                Port = _port,
                 Password = _password,
                 UserName = _userName,
             };
