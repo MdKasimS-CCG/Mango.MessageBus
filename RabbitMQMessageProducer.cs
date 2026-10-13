@@ -1,66 +1,75 @@
-﻿using Newtonsoft.Json;
-
+﻿
+using Microsoft.Extensions.Options;
+using Newtonsoft.Json;
 using RabbitMQ.Client;
-
 using System.Text;
-using System.Text.Json.Serialization;
 
-namespace Mango.MessageBus
+namespace Mango.MessageBus;
+
+public sealed class RabbitMQMessageProducer : IMessageProducer
 {
-    public class RabbitMQMessageProducer : IMessageProducer
+    private readonly RabbitMqSettings _settings;
+
+    public RabbitMQMessageProducer(IOptions<RabbitMqSettings> options)
     {
-        private readonly string _hostName;
-        private readonly string _userName;
-        private readonly string _password;
-        private IConnection _connection;
+        ArgumentNullException.ThrowIfNull(options);
 
-        public RabbitMQMessageProducer()
+        _settings = options.Value;
+
+        if (string.IsNullOrWhiteSpace(_settings.HostName))
+            throw new InvalidOperationException(
+                "RabbitMQ HostName is not configured.");
+
+        if (string.IsNullOrWhiteSpace(_settings.UserName))
+            throw new InvalidOperationException(
+                "RabbitMQ UserName is not configured.");
+
+        if (string.IsNullOrWhiteSpace(_settings.Password))
+            throw new InvalidOperationException(
+                "RabbitMQ Password is not configured.");
+
+        if (_settings.Port is < 1 or > 65535)
+            throw new InvalidOperationException(
+                "RabbitMQ Port must be between 1 and 65535.");
+    }
+
+    public async Task SendMessage(object message, string queueName)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        if (string.IsNullOrWhiteSpace(queueName))
+            throw new ArgumentException(
+                "Queue name cannot be empty.", nameof(queueName));
+
+        var factory = new ConnectionFactory
         {
-            // TODO: Make it DI specific code that can be passed via args as well
-            _hostName = "localhost";
-            _userName = "guest";
-            _password = "guest";
-        }
-        public async Task SendMessage(object message, string queueName)
-        {
-            var factory = new ConnectionFactory()
-            {
-                HostName = _hostName,
-                Password = _password,
-                UserName = _userName,
-            };
+            HostName = _settings.HostName,
+            Port = _settings.Port,
+            UserName = _settings.UserName,
+            Password = _settings.Password,
+            VirtualHost = _settings.VirtualHost
+        };
 
-            //TODO: Tutor has used CreateConnection(). But intellisense is not suggesting it.
-            _connection = await factory.CreateConnectionAsync();
+        await using var connection =
+            await factory.CreateConnectionAsync();
 
-            var channel = await _connection.CreateChannelAsync();
+        await using var channel =
+            await connection.CreateChannelAsync();
 
-            await channel.QueueDeclareAsync(
+        await channel.QueueDeclareAsync(
             queue: queueName,
             durable: false,
             exclusive: false,
             autoDelete: false,
             arguments: null);
 
-            // serialize message
-            var json = JsonConvert.SerializeObject(message);
-            var body = Encoding.UTF8.GetBytes(json);
+        var json = JsonConvert.SerializeObject(message);
+        var body = Encoding.UTF8.GetBytes(json);
 
-            // properties are optional but recommended (e.g., content-type)
-            //var props = channel.CreateOptions();
-            //props.ContentType = "application/json";
-
-            // publish to the default exchange ("") using the queue name as routing key
-            await channel.BasicPublishAsync(
-                exchange: "",
-                routingKey: queueName,
-                mandatory: false,
-                //basicProperties: props,
-                body: body // byte[] is accepted; will be wrapped as ReadOnlyMemory<byte>
-            );
-
-            await channel.DisposeAsync();
-            await _connection.DisposeAsync();
-        }
+        await channel.BasicPublishAsync(
+            exchange: "",
+            routingKey: queueName,
+            mandatory: false,
+            body: body);
     }
 }
