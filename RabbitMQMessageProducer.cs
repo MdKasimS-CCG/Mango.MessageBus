@@ -58,7 +58,7 @@ public sealed class RabbitMQMessageProducer : IMessageProducer
 
         await channel.QueueDeclareAsync(
             queue: queueName,
-            durable: false,
+            durable: true,
             exclusive: false,
             autoDelete: false,
             arguments: null);
