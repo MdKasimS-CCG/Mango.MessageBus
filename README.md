@@ -178,5 +178,3 @@ Verify that 2.0.0 is published to GitHub Packages, the NuGet source URL uses the
 Check that the queue exists, the consumer is connected and the queue is correctly bound. The producer uses `mandatory: false`, so an unroutable message is not returned to the publisher.
 
 ---
-
-Repository: [Mango.MessageBus on GitHub](https://github.com/MdKasimS-CCG/Mango.MessageBus)
