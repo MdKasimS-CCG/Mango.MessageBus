@@ -7,15 +7,13 @@
 
     <PackageId>Mango.MessageBus</PackageId>
 
-    <Version>1.0.0</Version>
+    <Version>2.0.0</Version>
 
     <Authors>Mahamadkasim Sache</Authors>
 
     <Description>Shared Message Bus library for Mango Microservices.</Description>
 
     <RepositoryUrl>https://github.com/MdKasimS-CCG/Mango.MessageBus.git</RepositoryUrl>
-
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 
     <Company>Cornerstone-Consulting</Company>
 
