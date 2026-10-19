@@ -178,3 +178,15 @@ Verify that 2.0.0 is published to GitHub Packages, the NuGet source URL uses the
 Check that the queue exists, the consumer is connected and the queue is correctly bound. The producer uses `mandatory: false`, so an unroutable message is not returned to the publisher.
 
 ---
+### Planned reliability improvements
+
+The current RabbitMQ producer reuses a connection and creates a separate channel for each publishing operation. The following improvements are candidates for future work and are not enabled merely by documenting them here.
+
+- **Durable queues:** Evaluate durable queue declarations and coordinate matching declarations across all producers and consumers.
+- **Persistent messages:** Evaluate persistent message delivery alongside durable queues.
+- **Publisher confirms:** Detect whether RabbitMQ acknowledges published messages.
+- **Unroutable messages:** Review mandatory publishing and how unroutable messages are reported or handled.
+- **Connection lifecycle:** Test concurrent publishing, reconnection, and graceful shutdown.
+- **Testing:** Add coverage for broker restarts, consumer outages, publication failures, and duplicate delivery.
+
+These changes should be implemented and tested separately, with the delivery guarantees and migration requirements documented before release.

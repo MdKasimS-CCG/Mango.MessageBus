@@ -78,6 +78,15 @@ public sealed class RabbitMQMessageProducer : IMessageProducer, IAsyncDisposable
         await using var channel =
             await connection.CreateChannelAsync();
 
+        // TODO (Reliability): Consider declaring queues as durable so their
+        // definitions survive a RabbitMQ broker restart.
+        //
+        // IMPORTANT: All producers and consumers declaring the same queue must
+        // use compatible queue settings. Coordinate this change with EmailAPI
+        // and RewardAPI before changing durable from false to true.
+        //
+        // Existing non-durable queues may need a controlled migration because
+        // RabbitMQ rejects redeclaration of a queue with different properties.
         await channel.QueueDeclareAsync(
             queue: queueName,
             durable: false,
@@ -88,12 +97,27 @@ public sealed class RabbitMQMessageProducer : IMessageProducer, IAsyncDisposable
         var json = JsonConvert.SerializeObject(message);
         var body = Encoding.UTF8.GetBytes(json);
 
+        // TODO (Reliability): Consider declaring queues as durable so their
+        // definitions survive a RabbitMQ broker restart.
+        //
+        // IMPORTANT: All producers and consumers declaring the same queue must
+        // use compatible queue settings. Coordinate this change with EmailAPI
+        // and RewardAPI before changing durable from false to true.
+        //
+        // Existing non-durable queues may need a controlled migration because
+        // RabbitMQ rejects redeclaration of a queue with different properties.
         await channel.BasicPublishAsync(
             exchange: "",
             routingKey: queueName,
             mandatory: false,
             body: body);
     }
+    // TODO (Reliability): Review connection lifecycle under concurrent
+    // publishing, connection failure, reconnection, and application shutdown.
+    //
+    // Ensure a connection cannot be disposed while an active publish is
+    // still using it. Add concurrency and shutdown tests before changing
+    // the lifecycle implementation.
     private async Task<IConnection> GetConnectionAsync()
     {
         await _connectionLock.WaitAsync();
