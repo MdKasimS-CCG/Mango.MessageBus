@@ -8,56 +8,58 @@ namespace Mango.MessageBus;
 
 public sealed class RabbitMQMessageProducer : IMessageProducer, IAsyncDisposable
 {
-    private readonly RabbitMqSettings _settings;
     private readonly ConnectionFactory _connectionFactory;
 
-    // Shared connection reused by all messages sent by this producer.
+    // Reuse one connection for this producer instance instead of opening
+    // a new TCP connection for every message.
     private IConnection? _connection;
 
-    // Prevents concurrent calls from creating multiple connections.
-    private readonly SemaphoreSlim _connectionLock = new(1, 1);
+    // Coordinates connection creation, publishing, and shutdown.
+    // This prevents the shared connection from being disposed during a send.
+    //
+    // Trade-off: sends are serialized. A future throughput improvement could
+    // allow concurrent sends while separately tracking active operations.
+    private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
 
     private bool _disposed;
-
 
     public RabbitMQMessageProducer(IOptions<RabbitMqSettings> options)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        _settings = options.Value
-           ?? throw new InvalidOperationException(
-               "RabbitMQ settings are not configured.");
+        var settings = options.Value
+            ?? throw new InvalidOperationException(
+                "RabbitMQ settings are not configured.");
 
-        // Keep the configuration validation in the constructor.
-
-        if (string.IsNullOrWhiteSpace(_settings.HostName))
+        // Validate configuration early to provide clear startup errors.
+        if (string.IsNullOrWhiteSpace(settings.HostName))
             throw new InvalidOperationException(
                 "RabbitMQ HostName is not configured.");
 
-        if (string.IsNullOrWhiteSpace(_settings.UserName))
+        if (string.IsNullOrWhiteSpace(settings.UserName))
             throw new InvalidOperationException(
                 "RabbitMQ UserName is not configured.");
 
-        if (string.IsNullOrWhiteSpace(_settings.Password))
+        if (string.IsNullOrWhiteSpace(settings.Password))
             throw new InvalidOperationException(
                 "RabbitMQ Password is not configured.");
 
-        if (_settings.Port is < 1 or > 65535)
+        if (settings.Port is < 1 or > 65535)
             throw new InvalidOperationException(
                 "RabbitMQ Port must be between 1 and 65535.");
 
-        if (string.IsNullOrWhiteSpace(_settings.VirtualHost))
+        if (string.IsNullOrWhiteSpace(settings.VirtualHost))
             throw new InvalidOperationException(
                 "RabbitMQ VirtualHost is not configured.");
 
-        // Create the factory once instead of creating it for every message.
+        // Keep one factory and use it whenever a connection is needed.
         _connectionFactory = new ConnectionFactory
         {
-            HostName = _settings.HostName,
-            Port = _settings.Port,
-            UserName = _settings.UserName,
-            Password = _settings.Password,
-            VirtualHost = _settings.VirtualHost
+            HostName = settings.HostName,
+            Port = settings.Port,
+            UserName = settings.UserName,
+            Password = settings.Password,
+            VirtualHost = settings.VirtualHost
         };
     }
 
@@ -66,91 +68,121 @@ public sealed class RabbitMQMessageProducer : IMessageProducer, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(message);
 
         if (string.IsNullOrWhiteSpace(queueName))
+        {
             throw new ArgumentException(
-                "Queue name cannot be empty.", nameof(queueName));
+                "Queue name cannot be empty.",
+                nameof(queueName));
+        }
 
-        // Reuse the shared connection.
-        var connection = await GetConnectionAsync();
-
-        // Use a separate channel for this publishing operation.
-        // Do not share one channel across concurrent SendMessage calls.
-
-        await using var channel =
-            await connection.CreateChannelAsync();
-
-        // TODO (Reliability): Consider declaring queues as durable so their
-        // definitions survive a RabbitMQ broker restart.
-        //
-        // IMPORTANT: All producers and consumers declaring the same queue must
-        // use compatible queue settings. Coordinate this change with EmailAPI
-        // and RewardAPI before changing durable from false to true.
-        //
-        // Existing non-durable queues may need a controlled migration because
-        // RabbitMQ rejects redeclaration of a queue with different properties.
-        await channel.QueueDeclareAsync(
-            queue: queueName,
-            durable: false,
-            exclusive: false,
-            autoDelete: false,
-            arguments: null);
-
-        var json = JsonConvert.SerializeObject(message);
-        var body = Encoding.UTF8.GetBytes(json);
-
-        // TODO (Reliability): Consider declaring queues as durable so their
-        // definitions survive a RabbitMQ broker restart.
-        //
-        // IMPORTANT: All producers and consumers declaring the same queue must
-        // use compatible queue settings. Coordinate this change with EmailAPI
-        // and RewardAPI before changing durable from false to true.
-        //
-        // Existing non-durable queues may need a controlled migration because
-        // RabbitMQ rejects redeclaration of a queue with different properties.
-        await channel.BasicPublishAsync(
-            exchange: "",
-            routingKey: queueName,
-            mandatory: false,
-            body: body);
-    }
-    // TODO (Reliability): Review connection lifecycle under concurrent
-    // publishing, connection failure, reconnection, and application shutdown.
-    //
-    // Ensure a connection cannot be disposed while an active publish is
-    // still using it. Add concurrency and shutdown tests before changing
-    // the lifecycle implementation.
-    private async Task<IConnection> GetConnectionAsync()
-    {
-        await _connectionLock.WaitAsync();
+        await _lifecycleLock.WaitAsync();
 
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
-            // Return the existing connection if it is still open.
-            if (_connection is { IsOpen: true })
-                return _connection;
+            // Reuse the connection or create a replacement if it has closed.
+            var connection = await GetConnectionAsync();
 
-            // Dispose the old connection if it exists but is no longer open.
-            if (_connection is not null)
+            // Enable publisher confirms and confirmation tracking.
+            // With RabbitMQ.Client 7.x, tracked publishing reports broker
+            // nacks and mandatory returns through the publish operation.
+            //
+            // Confirm that your installed RabbitMQ.Client version supports
+            // these CreateChannelOptions settings.
+            var channelOptions = new CreateChannelOptions(
+                publisherConfirmationsEnabled: true,
+                publisherConfirmationTrackingEnabled: true);
+
+            // Channels are lightweight. Create and dispose one per send.
+            await using var channel =
+                await connection.CreateChannelAsync(channelOptions);
+
+            // Durable queues survive broker restarts.
+            //
+            // Every producer and consumer declaring this queue must use
+            // compatible properties. Existing non-durable queues must be
+            // migrated or recreated safely before this declaration is used.
+            await channel.QueueDeclareAsync(
+                queue: queueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null);
+
+            // Serialize the message and encode it as UTF-8.
+            var json = JsonConvert.SerializeObject(message);
+            var body = Encoding.UTF8.GetBytes(json);
+
+            // Persistent delivery works together with a durable queue to
+            // improve message survival across broker restarts.
+            var properties = new BasicProperties
             {
-                await _connection.DisposeAsync();
-                _connection = null;
+                Persistent = true,
+                MessageId = Guid.NewGuid().ToString()
+            };
+
+            try
+            {
+                // Use the default exchange to route directly to the queue
+                // whose name matches the routing key.
+                //
+                // mandatory: true requests that unroutable messages be
+                // returned instead of silently discarded.
+                //
+                // Publisher confirmation tracking makes broker nacks and
+                // returned messages observable through the publish task.
+                // A successful confirmation means broker acceptance, not
+                // successful processing by EmailAPI or RewardAPI.
+                await channel.BasicPublishAsync(
+                    exchange: "",
+                    routingKey: queueName,
+                    mandatory: true,
+                    basicProperties: properties,
+                    body: body);
             }
-
-            // Create and retain a replacement connection.
-            _connection = await _connectionFactory.CreateConnectionAsync();
-
-            return _connection;
+            catch (Exception ex)
+            {
+                // Preserve the original exception so the caller can log it
+                // and decide how to handle the failed publishing operation.
+                //
+                // The message may have reached the broker before a connection
+                // failure was observed. Avoid blind retries unless consumers
+                // can safely handle duplicate deliveries.
+                throw new InvalidOperationException(
+                    $"Publishing to RabbitMQ queue '{queueName}' failed. " +
+                    "The message may or may not have been accepted by the broker.",
+                    ex);
+            }
         }
         finally
         {
-            _connectionLock.Release();
+            _lifecycleLock.Release();
         }
+    }
+
+    // The caller must hold _lifecycleLock before calling this method.
+    private async Task<IConnection> GetConnectionAsync()
+    {
+        if (_connection is { IsOpen: true })
+            return _connection;
+
+        // Dispose a previous connection that is no longer usable.
+        if (_connection is not null)
+        {
+            await _connection.DisposeAsync();
+            _connection = null;
+        }
+
+        // Connect lazily on the first send, not in the constructor.
+        // A subsequent send can create a replacement after a detected closure.
+        _connection = await _connectionFactory.CreateConnectionAsync();
+
+        return _connection;
     }
 
     public async ValueTask DisposeAsync()
     {
-        await _connectionLock.WaitAsync();
+        await _lifecycleLock.WaitAsync();
 
         try
         {
@@ -167,10 +199,10 @@ public sealed class RabbitMQMessageProducer : IMessageProducer, IAsyncDisposable
         }
         finally
         {
-            _connectionLock.Release();
+            _lifecycleLock.Release();
         }
 
-        // Intentionally leave the semaphore undisposed so a concurrent
-        // waiter cannot encounter a disposed semaphore during shutdown.
+        // Leave the semaphore undisposed so callers already waiting on it
+        // can enter and observe the disposed state.
     }
 }
