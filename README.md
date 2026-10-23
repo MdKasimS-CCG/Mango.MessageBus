@@ -1,12 +1,34 @@
 # Mango.MessageBus
 
-Mango.MessageBus is a shared messaging library for the Mango microservices. It provides a common `IMessageProducer` interface and a RabbitMQ-backed implementation for asynchronous, event-driven communication between services.
+## Migrating to 3.0.0
 
-**Package version:** `2.0.1`
+Version 3.0.0 contains breaking changes. Review these items before upgrading any service.
 
-Version 2.x includes breaking API changes. See [Migrating from 1.x](#migrating-from-1x).
+- The package targets .NET 10.0. Consumers must use a compatible target framework.
+- RabbitMQ configuration through `IOptions<RabbitMqSettings>` is required.
+- Register `IMessageProducer` as a singleton to reuse the producer's RabbitMQ connection.
+- Queue topology is supplied through `RabbitMqQueueOptions`. Remove reliance on the library's previous hardcoded RewardAPI queue configuration.
+- Align queue names, durability, dead-letter exchange, dead-letter queue, routing keys, and exchange type between publishers and consumers.
 
-> **Implementation status:** `RabbitMQMessageProducer` is the supported implementation. `AzureServiceBusMessageProducer` is a stub and is not currently usable. Broker selection is not configurable through the current implementation.
+### Existing RabbitMQ queues
+
+RabbitMQ does not modify an existing queue when a declaration changes its durability or arguments. A declaration with incompatible properties can fail with `PRECONDITION_FAILED` (406), causing publishing to fail.
+
+Before upgrading, inventory the existing queues and compare their current properties with the intended declarations. Plan a migration or safe recreation for incompatible queues. Do not blindly delete queues in shared or production environments: deleting a queue can permanently discard messages. Drain or preserve messages and coordinate the migration with all affected consumers before recreation.
+
+### Dependency injection migration
+
+Replace:
+
+`AddScoped<IMessageProducer, RabbitMQMessageProducer>()`
+
+with:
+
+`AddSingleton<IMessageProducer, RabbitMQMessageProducer>()`
+
+This is required for connection reuse across requests.
+
+Test the upgraded producer and consumer together before rolling out the package to all services.
 
 ## Contents
 
@@ -19,7 +41,7 @@ Version 2.x includes breaking API changes. See [Migrating from 1.x](#migrating-f
 - [Reliability and Delivery](#reliability-and-delivery)
 - [Dead-Letter Queue](#dead-letter-queue)
 - [Limitations](#limitations)
-- [Migrating from 1.x](#migrating-from-1x)
+- [Migrating to 3.0.0](#migrating-to-300)
 - [Troubleshooting](#troubleshooting)
 
 ## Features
@@ -32,7 +54,7 @@ Version 2.x includes breaking API changes. See [Migrating from 1.x](#migrating-f
 - Durable queue declarations and persistent messages.
 - Publisher confirmations and confirmation tracking.
 - Mandatory publishing to detect unroutable messages.
-- Dead-letter exchange and queue configuration for `rewardordercreated`.
+- Caller-supplied queue declaration arguments through RabbitMqQueueOptions.
 - Validation of required RabbitMQ settings.
 
 ## Requirements
@@ -61,7 +83,7 @@ Authenticate with a token that has permission to read packages. Keep credentials
 Add the package reference to the consuming service's project file:
 
 ```xml
-<PackageReference Include="Mango.MessageBus" Version="2.0.1" />
+<PackageReference Include="Mango.MessageBus" Version="3.0.0" />
 ```
 
 ## Configuration
@@ -108,9 +130,9 @@ using Mango.MessageBus;
 builder.Services.Configure<RabbitMqSettings>(
     builder.Configuration.GetSection("MessageQueue:RabbitMQ"));
 
-builder.Services.AddScoped<IMessageProducer, RabbitMQMessageProducer>();
+builder.Services.AddSingleton<IMessageProducer, RabbitMQMessageProducer>();
 ```
-
+Register the producer as a singleton so its RabbitMQ connection can be reused across requests and publishing operations. Scoped registration would create separate producer instances and defeat connection reuse. The singleton is disposed by dependency injection when the application shuts down.
 The producer is resolved through dependency injection. Its RabbitMQ connection is created lazily when the first message is sent, rather than during construction.
 
 The registration above does not itself validate the configuration at application startup.
@@ -135,7 +157,8 @@ public sealed class OrderPublisher
     {
         return _messageProducer.SendMessage(
             orderCreated,
-            "OrderCreatedQueue");
+            "OrderCreatedQueue",
+            orderCreated.EventId.ToString());
     }
 }
 ```
@@ -156,17 +179,19 @@ For each `SendMessage` call, `RabbitMQMessageProducer`:
 4. Creates a channel for the publishing operation and disposes it afterward.
 5. Declares the target queue with durable settings.
 6. Serializes the message to UTF-8 JSON.
-7. Publishes a persistent message with a generated `MessageId`.
+7. Publishes a persistent message using the caller-supplied `messageId`.
 8. Enables publisher confirmations and confirmation tracking, and publishes with `mandatory: true`.
 9. Disposes the channel and releases the lifecycle semaphore.
 
 ### Connection lifecycle
 
-The producer keeps a `ConnectionFactory` and reuses its connection across publishing operations for that producer instance.
+The producer enables RabbitMQ.Client automatic connection recovery and reuses
+its connection across publishing operations.
 
-If a subsequent send detects that the connection has closed, the producer disposes the previous connection and attempts to create a replacement. Connection recovery is attempted when another send occurs; the producer does not independently monitor and reconnect an idle connection.
-
-The lifecycle semaphore serializes sends and coordinates disposal. This prioritizes lifecycle safety over concurrent publishing throughput.
+If a connection interruption occurs, RabbitMQ.Client attempts recovery.
+The producer's connection lifecycle logic must be compatible with that recovery
+process. Recovery behavior should be verified through integration tests,
+including sends after an interruption.
 
 ### Queue durability and message persistence
 
@@ -188,46 +213,29 @@ A connection failure can occur after RabbitMQ has received a message. Blindly re
 
 ## Dead-Letter Queue
 
-The producer configures dead-letter handling specifically for the `rewardordercreated` queue.
+The publishing service supplies queue declaration arguments through
+`RabbitMqQueueOptions`. The shared library declares the requested main queue;
+it does not hardcode service-specific dead-letter topology.
 
-| Component | Name |
-|---|---|
-| Main queue | `rewardordercreated` |
-| Dead-letter exchange | `reward.dlx` |
-| Exchange type | Direct |
-| Dead-letter queue | `rewardordercreated.dlq` |
-| Dead-letter routing key | `rewardordercreated` |
+The service responsible for dead-letter topology must declare the dead-letter
+exchange and queue and bind them using the agreed routing key. The publisher
+and consumer must declare the main queue with compatible durability and
+arguments.
 
-The producer declares the dead-letter exchange and queue as durable, binds the dead-letter queue to the exchange, and configures the main queue with the corresponding dead-letter exchange and routing key.
-
-Messages rejected or negatively acknowledged without requeueing can be routed to the dead-letter queue when RabbitMQ's dead-letter conditions are met.
-
-The dead-letter configuration is hardcoded for `rewardordercreated`. Other queues receive durable declarations without these dead-letter arguments. This is not a general-purpose retry policy.
-
-The consuming service must declare the main queue using compatible arguments. The producer and consumer queue declarations must remain aligned.
+For example, a service may configure `x-dead-letter-exchange` and
+`x-dead-letter-routing-key` in `RabbitMqQueueOptions.Arguments`. The exact
+values must match the topology agreed upon by the affected services.
 
 ## Limitations
 
 - **No consumer implementation:** Consumers must be implemented in the consuming services.
 - **No exactly-once guarantee:** Publisher confirmations do not guarantee successful processing by a consumer.
 - **No general retry policy:** The package does not implement a configurable retry count, delay, or retry queue.
-- **Queue-specific dead-lettering:** Dead-letter configuration is specific to `rewardordercreated`.
+- **Message ID responsibility:** Callers must supply a stable message ID. The package does not generate or validate event identity beyond checking that the supplied ID is non-empty.
 - **No automatic idle reconnection:** A closed connection is replaced when a later send attempts to use it.
 - **Serialized publishing:** The lifecycle semaphore allows only one publishing operation at a time per producer instance.
 - **No broker switching:** Azure Service Bus is not currently implemented as a usable alternative.
 - **Deployment compatibility:** Existing queue declarations must be compatible with the durable and dead-letter settings used by the producer.
-
-## Migrating from 1.x
-
-Version 2.x introduces breaking API changes:
-
-- The parameterless `RabbitMQMessageProducer` constructor has been removed.
-- The producer is sealed; use composition instead of inheritance.
-- RabbitMQ configuration through `IOptions<RabbitMqSettings>` is required.
-- Consumers should resolve `IMessageProducer` through dependency injection.
-- Existing services must configure the `MessageQueue:RabbitMQ` section and use a compatible package version.
-
-Review queue declarations before upgrading services. Changing a queue from non-durable to durable, or changing its arguments, does not modify an existing RabbitMQ queue. Existing queues may need a planned migration or safe recreation.
 
 ## Troubleshooting
 
