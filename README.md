@@ -1,12 +1,12 @@
 # Mango.MessageBus
 
-Mango.MessageBus is a shared messaging library for the Mango microservices. It provides a common `IMessageProducer` interface and a RabbitMQ-backed implementation to support asynchronous, event-driven communication between services.
+Mango.MessageBus is a shared messaging library for the Mango microservices. It provides a common `IMessageProducer` interface and a RabbitMQ-backed implementation for asynchronous, event-driven communication between services.
 
-**Current package version:** `2.0.1` (as specified in `Mango.MessageBus.csproj`)
+**Package version:** `2.0.1`
 
-**Breaking change:** Version 2.x requires RabbitMQ configuration through `IOptions<RabbitMqSettings>`. See [Migrating from 1.x](#migrating-from-1x).
+Version 2.x includes breaking API changes. See [Migrating from 1.x](#migrating-from-1x).
 
-> **Implementation status:** `RabbitMQMessageProducer` is implemented. `AzureServiceBusMessageProducer` is currently a stub and is not usable. Broker selection is not configurable through the current implementation.
+> **Implementation status:** `RabbitMQMessageProducer` is the supported implementation. `AzureServiceBusMessageProducer` is a stub and is not currently usable. Broker selection is not configurable through the current implementation.
 
 ## Contents
 
@@ -28,23 +28,23 @@ Mango.MessageBus is a shared messaging library for the Mango microservices. It p
 - RabbitMQ-backed message publishing.
 - JSON serialization using Newtonsoft.Json.
 - Reusable RabbitMQ connection per producer instance.
-- Separate channel creation and disposal for each publishing operation.
+- A channel created and disposed for each publishing operation.
 - Durable queue declarations and persistent messages.
 - Publisher confirmations and confirmation tracking.
 - Mandatory publishing to detect unroutable messages.
 - Dead-letter exchange and queue configuration for `rewardordercreated`.
-- Configuration validation for required RabbitMQ settings.
+- Validation of required RabbitMQ settings.
 
 ## Requirements
 
 - .NET 10.0.
 - A reachable RabbitMQ instance.
-- Access to the Mango.MessageBus package hosted on GitHub Packages.
+- Access to the Mango.MessageBus package on GitHub Packages.
 - A GitHub Packages token with permission to read packages.
 
 ## Installation
 
-The package is hosted on GitHub Packages. Configure the package source in a `NuGet.Config` file in the consuming repository:
+Configure GitHub Packages as a NuGet package source in a `NuGet.Config` file used by the consuming repository:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -64,11 +64,9 @@ Add the package reference to the consuming service's project file:
 <PackageReference Include="Mango.MessageBus" Version="2.0.1" />
 ```
 
-Use this version only after `2.0.1` has been published and is available to the consuming environment. Otherwise, use the version that is actually published.
-
 ## Configuration
 
-The producer uses `RabbitMqSettings` to configure the RabbitMQ connection.
+The producer uses `RabbitMqSettings` to configure its RabbitMQ connection.
 
 | Property | Type | Required | Default |
 |---|---|---|---|
@@ -90,7 +88,7 @@ MessageQueue__RabbitMQ__Password=<configured password>
 MessageQueue__RabbitMQ__VirtualHost=/
 ```
 
-Replace the placeholder values with your environment's configuration. Do not commit real credentials.
+Replace placeholder values with your environment's configuration. Do not commit real credentials.
 
 Choose the hostname according to the deployment environment:
 
@@ -146,13 +144,11 @@ public sealed class OrderPublisher
 
 The producer serializes the message to JSON and publishes it to RabbitMQ's default exchange using the queue name as the routing key.
 
-Consumers are implemented separately; this package does not provide a consumer API.
-
-Publish an event only after the underlying operation—for example, saving an order—has succeeded.
+Consumers are implemented separately; this package does not provide a consumer API. Publish an event only after the underlying operation—for example, saving an order—has succeeded.
 
 ## Reliability and Delivery
 
-The current `RabbitMQMessageProducer` implements the following behavior for each `SendMessage` call:
+For each `SendMessage` call, `RabbitMQMessageProducer`:
 
 1. Validates the message and queue name.
 2. Acquires a lifecycle semaphore to coordinate publishing, connection creation, and disposal.
@@ -168,9 +164,9 @@ The current `RabbitMQMessageProducer` implements the following behavior for each
 
 The producer keeps a `ConnectionFactory` and reuses its connection across publishing operations for that producer instance.
 
-If a subsequent send detects that the connection has closed, the producer disposes the previous connection and attempts to create a replacement. Connection recovery is therefore attempted when another send occurs; the producer does not independently monitor and reconnect an idle connection.
+If a subsequent send detects that the connection has closed, the producer disposes the previous connection and attempts to create a replacement. Connection recovery is attempted when another send occurs; the producer does not independently monitor and reconnect an idle connection.
 
-The lifecycle semaphore also serializes sends and coordinates disposal. This favors lifecycle safety over concurrent publishing throughput.
+The lifecycle semaphore serializes sends and coordinates disposal. This prioritizes lifecycle safety over concurrent publishing throughput.
 
 ### Queue durability and message persistence
 
@@ -192,7 +188,7 @@ A connection failure can occur after RabbitMQ has received a message. Blindly re
 
 ## Dead-Letter Queue
 
-The producer currently configures dead-letter handling specifically for the `rewardordercreated` queue.
+The producer configures dead-letter handling specifically for the `rewardordercreated` queue.
 
 | Component | Name |
 |---|---|
@@ -206,16 +202,16 @@ The producer declares the dead-letter exchange and queue as durable, binds the d
 
 Messages rejected or negatively acknowledged without requeueing can be routed to the dead-letter queue when RabbitMQ's dead-letter conditions are met.
 
-**Important:** The dead-letter configuration is currently hardcoded for `rewardordercreated`. Other queues receive durable declarations without these dead-letter arguments. This is not a general-purpose retry policy.
+The dead-letter configuration is hardcoded for `rewardordercreated`. Other queues receive durable declarations without these dead-letter arguments. This is not a general-purpose retry policy.
 
-The consuming service must declare the main queue using compatible arguments. Coordinate queue declarations between the producer and consumer before deploying this change to an environment with existing queues.
+The consuming service must declare the main queue using compatible arguments. The producer and consumer queue declarations must remain aligned.
 
 ## Limitations
 
 - **No consumer implementation:** Consumers must be implemented in the consuming services.
 - **No exactly-once guarantee:** Publisher confirmations do not guarantee successful processing by a consumer.
 - **No general retry policy:** The package does not implement a configurable retry count, delay, or retry queue.
-- **Queue-specific dead-lettering:** Dead-letter configuration is currently specific to `rewardordercreated`.
+- **Queue-specific dead-lettering:** Dead-letter configuration is specific to `rewardordercreated`.
 - **No automatic idle reconnection:** A closed connection is replaced when a later send attempts to use it.
 - **Serialized publishing:** The lifecycle semaphore allows only one publishing operation at a time per producer instance.
 - **No broker switching:** Azure Service Bus is not currently implemented as a usable alternative.
@@ -249,7 +245,7 @@ The producer and consumer may be declaring the same queue with incompatible dura
 
 ### Package restore cannot find Mango.MessageBus
 
-Verify that the referenced package version has been published, that the GitHub Packages source URL is correct, and that the environment has valid package-read credentials.
+Verify that the package source URL is correct, that the requested package version is available, and that the environment has valid package-read credentials.
 
 ### A message is not received by a consumer
 
