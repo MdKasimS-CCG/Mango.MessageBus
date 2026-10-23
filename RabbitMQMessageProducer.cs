@@ -102,12 +102,55 @@ public sealed class RabbitMQMessageProducer : IMessageProducer, IAsyncDisposable
             // Every producer and consumer declaring this queue must use
             // compatible properties. Existing non-durable queues must be
             // migrated or recreated safely before this declaration is used.
-            await channel.QueueDeclareAsync(
-                queue: queueName,
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: null);
+
+            if (queueName == "rewardordercreated")
+            {
+                const string deadLetterExchange = "reward.dlx";
+                const string deadLetterQueue = "rewardordercreated.dlq";
+                const string deadLetterRoutingKey = "rewardordercreated";
+
+                await channel.ExchangeDeclareAsync(
+                    exchange: deadLetterExchange,
+                    type: ExchangeType.Direct,
+                    durable: true,
+                    autoDelete: false,
+                    arguments: null);
+
+                await channel.QueueDeclareAsync(
+                    queue: deadLetterQueue,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: null);
+
+                await channel.QueueBindAsync(
+                    queue: deadLetterQueue,
+                    exchange: deadLetterExchange,
+                    routingKey: deadLetterRoutingKey);
+
+                var queueArguments = new Dictionary<string, object?>
+                {
+                    ["x-dead-letter-exchange"] = deadLetterExchange,
+                    ["x-dead-letter-routing-key"] = deadLetterRoutingKey
+                };
+
+                await channel.QueueDeclareAsync(
+                    queue: queueName,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: queueArguments);
+            }
+            else
+            {
+                await channel.QueueDeclareAsync(
+                    queue: queueName,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: null);
+            }
+
 
             // Serialize the message and encode it as UTF-8.
             var json = JsonConvert.SerializeObject(message);
